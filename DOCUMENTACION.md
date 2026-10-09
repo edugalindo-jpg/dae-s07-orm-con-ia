@@ -697,4 +697,114 @@ python manage.py test blog.tests.test_agent
 
 ---
 
+## Paso 14 — Flujo de aprobación, hash y concurrencia
+
+> Nota: `seed_blog` borra y reinserta, así que los `id` autoincrementales siguen creciendo
+> (los artículos quedan en 16-30 tras un reseed). Todas las pruebas de este paso se hicieron
+> contra el `id` real del artículo, no contra el número de la semilla.
+
+### 14.1 Aprobación limpia (artículo 5)
+
+```bash
+$ python manage.py agent --intent '{"action": "delete_comments_of_post", "args": {"post_id": 5}}'
+```
+
+```json
+{"status": "approval_required",
+ "plan": {"action": "delete_comments_of_post", "args": {"post_id": 5},
+          "details": {"affected_comment_ids": [16]},
+          "plan_hash": "4d7ffe2c0e99"}}
+→ No se aplicó nada. Si TÚ apruebas este plan, repite el comando con --approve 4d7ffe2c0e99
+```
+
+- **Antes de aprobar:** `Comment.objects.count() = 23` → el plan **no** borra nada.
+- Aprobación:
+
+```bash
+$ python manage.py agent --intent '{"action": "delete_comments_of_post", "args": {"post_id": 5}}' --approve 4d7ffe2c0e99
+{"status": "applied", "plan": {… "plan_hash": "4d7ffe2c0e99"}, "result": {"deleted": 1}}
+```
+
+- `Comment.objects.count() = 22` (se borró el comentario `id=16`).
+- **Restauración:** `python manage.py seed_blog` → `Listo: 4 autores, 15 artículos, 23 comentarios.`
+
+### 14.2 Prueba de concurrencia (TOCTOU): el hash viejo deja de servir
+
+**Secuencia ejecutada:**
+
+1. **Generar el plan** (artículo 16 = "Introducción al ORM de Django", 6 comentarios):
+
+```json
+{"status": "approval_required",
+ "plan": {"details": {"affected_comment_ids": [24,25,26,27,28,29]},
+          "plan_hash": "a8e3ec55dfc9"}}
+```
+
+2. **Otro usuario escribe un comentario** entre la generación y la aprobación
+   (el caso "le llega tarde al plan"):
+
+```python
+Comment.objects.create(post_id=16, author_name="Lector tarde", text="Llegue tarde al plan")
+# total: 24 · comentarios del post 16: 7   (antes: 6)
+```
+
+3. **Aprobar con el hash viejo** `--approve a8e3ec55dfc9`:
+
+```json
+{"status": "approval_required",
+ "plan": {"details": {"affected_comment_ids": [24,25,26,27,28,29,47]},
+          "plan_hash": "151db436bf20"}}
+→ No se aplicó nada.
+```
+
+**Nada se borró** (`post 16: 7 comentarios`, `total: 24`). El hash `a8e3ec55dfc9` ya no
+corresponde a ningún plan válido.
+
+4. **Aprobar con el hash recién emitido** `--approve 151db436bf20` →
+   `{"status": "applied", …, "result": {"deleted": 7}}`.
+5. **Restaurar:** `python manage.py seed_blog` → 23 comentarios.
+
+### 14.3 Explicación: invalidación por Hash / Estado
+
+El mecanismo está en `blog/agent/registry.py:102-131`:
+
+```python
+def plan_hash(action, args, details):
+    canonical = json.dumps({"action": action.name, "args": args, "details": details},
+                           sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+# en execute():
+details = action.plan(**args)              # ← se calcula SIEMPRE con el estado ACTUAL
+digest = plan_hash(action, args, details)
+if approval != digest:
+    return {"status": "approval_required", "plan": plan}   # ← el hash viejo no sirve
+return {"status": "applied", …}
+```
+
+Puntos clave:
+
+1. **El hash identifica un plan concreto, no una intención.** No se firma
+   `delete_comments_of_post(post_id=16)`; se firma la **combinación**
+   `{action, args, details}` donde `details` es la lista exacta de ids que se van a borrar.
+   Cambia un solo id → cambia el JSON canónico → cambia el SHA-256 → otro hash.
+2. **`details` se recalcula en cada invocación.** El plan que revisó el humano es una foto
+   del estado *t*; al aprobar, el sistema vuelve a fotografiar el estado *t+1*. Si algo cambió
+   entre medias (comentario nuevo, borrado, edición), las fotos no coinciden y la aprobación
+   se rechaza. Esto cierra la carrera **TOCTOU** (*time-of-check to time-of-use*): la
+   aprobación no es un "sí a borrar lo que sea", es un "sí a borrar *exactamente estos ids*".
+3. **`approval` solo viene de la CLI.** El modelo propone la intención, pero `--approve` lo
+   escribe una persona (`commands/agent.py`); el modelo no recibe ese argumento.
+4. **El resultado distingue los estados:** `denied` (acción/argumentos inválidos) ·
+   `approval_required` (lectura correcta, falta el visto humano o el plan caducó) ·
+   `applied` (hash coincidente, se ejecuta en `transaction.atomic()`).
+5. **Si el plan caducado se aprueba de nuevo con el hash nuevo**, se aplica sobre el estado
+   actual (7 comentarios, no 6): el humano vuelve a ver el detalle antes de confirmar.
+
+Comprobación automática (ya existente en la suite):
+`test_the_approval_dies_if_the_data_changed_after_the_human_looked`
+(`blog/tests/test_agent.py:42`) hace exactamente esta prueba y pasa.
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
