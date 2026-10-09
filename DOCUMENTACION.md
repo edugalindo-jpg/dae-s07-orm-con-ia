@@ -206,4 +206,147 @@ fallidas que registrar.
 
 ---
 
+## Paso 6 — Veredictos de la IA (`python manage.py duel --source ai`)
+
+```
+Duelo — respuestas de: ai
+q1  ✔ correcta               1 consulta(s)   Los artículos que ya están publicados.
+q2  ✔ correcta               1 consulta(s)   Los artículos que no tienen categoría asignada.
+q3  ✘ resultado distinto     1 consulta(s)   Los artículos publicados entre el 1 de marzo y el 31 de mayo
+      └─ faltan 2 (p. ej. 'Introducción al ORM de Django')
+q4  ⚠ correcta pero cara     16 consulta(s)  Los artículos con más de dos comentarios.
+      └─ 16 consultas; una buena respuesta necesita 1
+q5  ✘ resultado distinto     1 consulta(s)   Los tres artículos publicados con más comentarios…
+      └─ devolvió [('Introducción al ORM de Django', 18, 18), ('QuerySets perezosos', 12, 12),
+                   ('Managers propios paso a paso', 8, 8)]
+         se esperaba [('Introducción al ORM de Django', 6, 3),
+                      ('Managers propios paso a paso', 4, 2),
+                      ('QuerySets perezosos', 3, 4)]
+q6  ✘ error                  0 consulta(s)   Los artículos escritos por autores de Perú…
+      └─ FieldError: Unsupported lookup 'country' for ForeignKey or join on the field not permitted.
+q7  ✔ correcta               1 consulta(s)   Los comentarios de los artículos de la categoría «Tecnología».
+q8  ✘ resultado distinto     1 consulta(s)   Los autores que nunca han publicado un artículo.
+      └─ faltan 1 (p. ej. 'Diego Pinto'); sobran 1 (p. ej. 'Ana Quispe')
+
+3 de 8 correctas y baratas.
+```
+
+**Marcador: IA 3/8, equipo 8/8.**
+
+## Paso 7 — Diagnóstico de los fallos de la IA
+
+Clasificación pedida: **borde · significado · conteos multiplicados · campo inventado ·
+cara/ineficiente**.
+
+| Pregunta | Veredicto | Clasificación | Causa raíz |
+|---|---|---|---|
+| q1 | ✔ correcta | — | — |
+| q2 | ✔ correcta | — | — |
+| q3 | ✘ distinto | **borde** | límites abiertos: excluye los dos extremos exigidos |
+| q4 | ⚠ cara | **cara/ineficiente (N+1)** | lista por comprensión con `post.comments.count()` |
+| q5 | ✘ distinto | **conteos multiplicados** | `Count` sin `distinct=True` con dos JOINs |
+| q6 | ✘ error | **campo inventado** | `author__country` no existe (el país vive en `Profile`) |
+| q7 | ✔ correcta | — | — |
+| q8 | ✘ distinto | **significado** | "tiene borradores" ≠ "nunca ha publicado" |
+
+### q3 — borde (límites excluyentes)
+
+```python
+# IA
+Post.objects.filter(published_at__gt=date(2026, 3, 1), published_at__lt=date(2026, 5, 31))
+# SQL generado (print(team/ai q3().query))
+WHERE ("blog_post"."published_at" > 2026-03-01 AND "blog_post"."published_at" < 2026-05-31)
+
+# Equipo
+Post.objects.filter(published_at__range=(date(2026, 3, 1), date(2026, 5, 31)))
+WHERE "blog_post"."published_at" BETWEEN 2026-03-01 AND 2026-05-31
+```
+
+**Diff:** faltan 2 artículos, exactamente los que caen *en* los bordes:
+`'Introducción al ORM de Django'` (2026-03-01) y `'Reseña: festival de cine andino'` (2026-05-31).
+`seed_data` los puso a propósito en los límites: el enunciado dice "ambos días incluidos",
+y `>`/`<` es la clásica respuesta de *off-by-one*.
+
+### q4 — cara/ineficiente (N+1)
+
+```python
+# IA (16 consultas: 1 de SELECT de posts + 15 de .count() por artículo)
+return [post for post in Post.objects.all() if post.comments.count() > 2]
+
+# Equipo (1 consulta)
+Post.objects.annotate(n_comments=Count("comments")).filter(n_comments__gt=2)
+```
+
+El resultado es el correcto (3 filas), pero el veredicto es "correcta pero cara": el oráculo
+exige `budget=1`. Cada `post.comments.count()` es un `SELECT COUNT(*) … WHERE post_id = …`
+adicional → **1 + 15 = 16 consultas**, complejidad O(N) en el número de artículos. Es el mismo
+antipatrón N+1 que se audita en los Pasos 9-11.
+
+### q5 — conteos multiplicados (falta `distinct=True`)
+
+```python
+# IA
+.annotate(n_comments=Count("comments"), n_tags=Count("tags"))
+```
+
+```sql
+-- SQL de la IA (sin DISTINCT):
+COUNT("blog_comment"."id") AS "n_comments", COUNT("blog_post_tags"."tag_id") AS "n_tags"
+FROM "blog_post"
+LEFT OUTER JOIN "blog_comment"    ON ("blog_post"."id" = "blog_comment"."post_id")
+LEFT OUTER JOIN "blog_post_tags"  ON ("blog_post"."id" = "blog_post_tags"."post_id")
+GROUP BY "blog_post"."id", … ORDER BY 8 DESC LIMIT 3
+```
+
+```sql
+-- SQL del equipo (con DISTINCT):
+COUNT(DISTINCT "blog_comment"."id") AS "n_comments", COUNT(DISTINCT "blog_post_tags"."tag_id") AS "n_tags"
+```
+
+Al hacer dos `LEFT JOIN` en la misma consulta, las filas se **multiplican entre sí**
+(comentario × etiqueta). `COUNT` cuenta filas, así que 6 comentarios × 3 etiquetas = **18** en
+lugar de 6; los tres puestos salen con `18/18`, `12/12`, `8/8` y el orden del *top 3* queda
+alterado (`QuerySets perezosos` aparece segundo en vez de tercero). `COUNT(DISTINCT …)` cuenta
+valores únicos y anula la multiplicación. El veredicto del duelo lo muestra en crudo:
+`devolvió (…, 18, 18); se esperaba (…, 6, 3)`.
+
+### q6 — campo inventado
+
+```python
+Post.objects.filter(author__country="Perú")
+# FieldError: Unsupported lookup 'country' for ForeignKey or join on the field not permitted.
+```
+
+`country` no existe en `Author`; está en `Profile`, la entidad 1:1 (`blog/models.py:14`).
+La IA "inventó" el campo: el ORM ni siquiera llega a ejecutar SQL (0 consultas). Corrección:
+`Post.objects.filter(author__profile__country="Perú")`.
+
+### q8 — significado (respuesta correcta a otra pregunta)
+
+```python
+# IA  → SELECT … FROM blog_author INNER JOIN blog_post … WHERE "blog_post"."published" = False
+Author.objects.filter(posts__published=False)
+# Equipo → WHERE NOT (EXISTS (SELECT 1 FROM blog_post WHERE published = True …))
+Author.objects.exclude(posts__published=True)
+```
+
+La IA respondió "autores que **tienen** algún artículo sin publicar" (Ana + Carla×3, con filas
+duplicadas) cuando se pedía "autores que **nunca** han publicado" (Carla + Diego). No es un
+error de sintaxis sino de **interpretación del enunciado**: un clásico caso en el que la consulta
+es válida pero responde otra pregunta. Nota: el duelo lo reporta como "resultado distinto
+(faltan 1, sobran 1)"; la clasificación semántica es *significado*.
+
+### Resumen de aceptación
+
+| Pregunta | ¿Aceptarías la respuesta de la IA? |
+|---|---|
+| q1, q2, q7 | Sí, idénticas a las del equipo. |
+| q3 | No: hay que cambiar `>/<` por `>=`/`<=` (`__range`). |
+| q4 | Solo como borrador: correcta, pero debe reescribirse con `annotate`. |
+| q5 | No: añadir `distinct=True` a ambos `Count`. |
+| q6 | No: hay que corregir el campo a `author__profile__country`. |
+| q8 | No: cambiar `filter` por `exclude`. |
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
