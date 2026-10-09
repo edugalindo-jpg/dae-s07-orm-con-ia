@@ -40,19 +40,26 @@ def q4():
 def q5():
     """Los tres artículos publicados con más comentarios; de cada uno, cuántos comentarios
     (`n_comments`) y cuántas etiquetas (`n_tags`)."""
-    raise NotImplementedError
+    return (
+        Post.objects.filter(published=True)
+        .annotate(
+            n_comments=Count("comments", distinct=True),
+            n_tags=Count("tags", distinct=True),
+        )
+        .order_by("-n_comments", "title")[:3]
+    )
 
 
 def q6():
     """Los artículos escritos por autores de Perú (publicados o no)."""
-    raise NotImplementedError
+    return Post.objects.filter(author__profile__country="Perú")
 
 
 def q7():
     """Los comentarios de los artículos de la categoría «Tecnología»."""
-    raise NotImplementedError
+    return Comment.objects.filter(post__category__name="Tecnología")
 
 
 def q8():
     """Los autores que nunca han publicado un artículo."""
-    raise NotImplementedError
+    return Author.objects.exclude(posts__published=True)

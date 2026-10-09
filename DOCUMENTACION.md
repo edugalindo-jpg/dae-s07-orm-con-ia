@@ -113,4 +113,97 @@ Cadena de recorrido más usada en las consultas:
 
 ---
 
+## Paso 4 — Consultas duel, preguntas 1 a 4
+
+Implementadas en `blog/duel/team.py` y verificadas con `python manage.py duel`:
+
+| Pregunta | Consulta ORM | Consultas SQL | Veredicto |
+|---|---|---|---|
+| q1 | `Post.objects.filter(published=True)` | 1 | ✔ correcta |
+| q2 | `Post.objects.filter(category__isnull=True)` | 1 | ✔ correcta |
+| q3 | `Post.objects.filter(published_at__range=(date(2026,3,1), date(2026,5,31)))` | 1 | ✔ correcta |
+| q4 | `Post.objects.annotate(n_comments=Count("comments")).filter(n_comments__gt=2)` | 1 | ✔ correcta |
+
+Notas:
+
+- **q2**: el `ForeignKey` de `Category` es `null=True, blank=True`, por eso los artículos sin
+  categoría existen y el filtro `category__isnull=True` es el correcto (no `category=None` en
+  Python, que sería filtrar en el cliente).
+- **q3**: `__range` en Django es **inclusivo** en ambos extremos, justo lo que pide el enunciado
+  ("ambos días incluidos"). Los *drafts* tienen `published_at = NULL` y quedan fuera del rango
+  automáticamente, igual que hace el oráculo (`seed_data`).
+- **q4**: el conteo se hace en la base con `annotate(Count("comments"))` y se filtra sobre la
+  anotación; una sola consulta, sin `post.comments.count()` en Python (que sería N+1).
+
+Resultado: **4 de 8 correctas y baratas.**
+
+---
+
+## Paso 5 — Consultas duel, preguntas 5 a 8
+
+Implementadas en `blog/duel/team.py`.
+
+| Pregunta | Intento | Consulta ORM | Consultas SQL | Veredicto |
+|---|---|---|---|---|
+| q5 | 1.º | ver código abajo | 1 | ✔ correcta |
+| q6 | 1.º | `Post.objects.filter(author__profile__country="Perú")` | 1 | ✔ correcta |
+| q7 | 1.º | `Comment.objects.filter(post__category__name="Tecnología")` | 1 | ✔ correcta |
+| q8 | 1.º | `Author.objects.exclude(posts__published=True)` | 1 | ✔ correcta |
+
+**q5 — la pregunta clave de los duplicados**
+
+```python
+return (
+    Post.objects.filter(published=True)
+    .annotate(
+        n_comments=Count("comments", distinct=True),
+        n_tags=Count("tags", distinct=True),
+    )
+    .order_by("-n_comments", "title")[:3]
+)
+```
+
+- El `annotate` hace **dos JOINs simultáneos**: uno con `blog_comment` y otro con la tabla
+  intermedia `blog_post_tags`. Sin `distinct=True`, Django multiplica las filas del *crucé*
+  (cartesiano entre comentarios y etiquetas) y los dos `COUNT` quedan inflados
+  (p. ej. 6 comentarios × 3 etiquetas = 18 en vez de 6 y 3). Ese es el fallo típico de
+  "conteos multiplicados".
+- `Count(..., distinct=True)` cuenta valores **distintos**, así cada comentario/etiqueta se
+  cuenta una sola vez aunque aparezca repetido por la multiplicación de filas.
+- `order_by("-n_comments")` + `[:3]` entrega el *top 3* con más comentarios; el oráculo espera
+  exactamente 6, 4 y 3 comentarios (sin empates en el podio), así que el orden es estable.
+
+**q6** — el país no está en `Author` sino en `Profile` (relación 1:1), por eso se recorre
+`author__profile__country` (JOIN, una sola consulta). Filtrar `author__country` daría `FieldError`.
+
+**q7** — `Comment → Post → Category`: se navega la cadena inversa con `__` en una sola consulta.
+
+**q8** — "nunca han publicado" = *exclusión* de los autores que tienen algún artículo publicado:
+
+```python
+Author.objects.exclude(posts__published=True)
+# SELECT … FROM blog_author WHERE NOT (EXISTS (
+#     SELECT 1 FROM blog_post U1 WHERE U1.published = True AND U1.author_id = blog_author.id LIMIT 1))
+# → ['Carla Rojas', 'Diego Pinto']  ✔
+```
+
+Dos alternativas fallan y se comprobó empíricamente:
+
+```python
+Author.objects.filter(posts__isnull=True)      # → ['Diego Pinto']  ✘ solo el que no escribe nada
+Author.objects.filter(posts__published=False)  # → Ana, Carla×3      ✘ JOIN con published=False
+```
+
+- `posts__isnull=True` solo encuentra a quien **no tiene ningún artículo**; se queda fuera a
+  Carla, que sí escribe pero nada está publicado.
+- `posts__published=False` genera un `INNER JOIN … WHERE published = False`, o sea "tiene algún
+  artículo sin publicar" (además devuelve filas duplicadas, una por borrador). Devuelve a Ana,
+  que sí tiene artículos publicados: resultado incorrecto.
+
+**Resultado final: `python manage.py duel` → 8 de 8 correctas y baratas (1 consulta por
+pregunta).** Todos los intentos de las 8 preguntas fueron de primera; no hubo iteraciones
+fallidas que registrar.
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
