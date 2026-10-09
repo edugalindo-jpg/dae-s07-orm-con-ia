@@ -807,4 +807,78 @@ Comprobación automática (ya existente en la suite):
 
 ---
 
-*(Los pasos siguientes se van agregando abajo.)*
+## Paso 15 — Consolidación del entregable
+
+### 15.1 Bitácora / tabla de uso de IA
+
+| # | Petición (prompt/resumen) | Respuesta de la IA | Aceptado / Rechazado | Justificación |
+|---|---|---|---|---|
+| 1 | "Crea e instala el entorno, migra y siembra la BD" | Comandos de `venv`, `pip install`, `migrate` y `seed_blog` | **Aceptado** | Resultado comprobado en consola: 4 autores, 15 artículos, 23 comentarios; sin alucinaciones. |
+| 2 | "Cuenta autores/artículos/comentarios y redacta el diagrama ER" | Tabla de conteos + ER textual (1:1, FK opcional, M:N, FK) | **Aceptado** | Los números se obtuvieron ejecutando el ORM; las relaciones se contrastaron línea por línea con `blog/models.py`. |
+| 3 | "Escribe las consultas q1-q4 del duelo" | `filter(published=True)`, `category__isnull`, `__range`, `annotate(Count)` | **Aceptado** | Verificado por el oráculo: 4/4 `ok`, 1 consulta c/u. El oráculo (no la IA) es quien certifica. |
+| 4 | "Escribe las consultas q5-q8 (cuidado con duplicados)" | `Count(distinct=True)`, `author__profile__country`, `exclude(posts__published=True)` | **Aceptado** | 8/8 `ok` y baratas; la cláusula `distinct=True` se justificó con el SQL real de los dos JOINs. |
+| 5 | "Diagnostica las respuestas de la IA (`--source ai`)" | 5 fallos clasificados (borde, N+1, conteos, campo inventado, significado) con SQL y diffs | **Aceptado** | Cada clasificación se apoya en el `print(queryset.query)` y en el diff de resultados del duelo. |
+| 6 | "Genera las 8 consultas desde cero con solo `models.py`" | `blog/duel/ai_fresh.py` → 8/8 | **Aceptado con reserva** | Aceptado como experimento; la reserva está declarada en el Paso 8: no es medición ciega, el modelo ya había visto el oráculo. |
+| 7 | "Explica el N+1 con las 23 consultas capturadas" | Desglose 1 + 11 + 11 y $O(N)$ con tabla de escalado | **Aceptado** | Coincide con el listado real que Django capturó en el test. |
+| 8 | "Corrige `queries.py` para que pasen las pruebas" | `select_related("author") + prefetch_related("tags")` | **Aceptado** | Prueba: 23 → **2 consultas**; `manage.py test` en 0 fallos (24 tests). |
+| 9 | "Clasifica el resultado de las 4 intenciones del agente" | `ok`, `ok`, `approval_required`, `denied` con justificación por riesgo R0/R2 | **Aceptado** | Salidas capturadas de la CLI; verificado que los 23 comentarios no cambiaron. |
+| 10 | "Analiza la inyección de prompt del comentario 4" | Riesgo (indirect prompt injection) + 6 controles de `registry.py` | **Aceptado** | Contrastado con `seed_data.HOSTILE_COMMENT` y con los tests `test_following_the_injection_deletes_nothing`. |
+| 11 | "Prueba aprobación y concurrencia con hash" | 4 planes capturados; hash viejo rechazado tras un INSERT concurrente | **Aceptado** | Evidencia empírica: `a8e3ec55dfc9` → rechazado; `151db436bf20` (7 ids) → `applied`. |
+| 12 | Respuestas de la IA pregrabada (`ai_answers.py`) | q1, q2, q7 correctas; **q3, q4, q5, q6, q8 fallidas** | **Rechazado (5/8)** | q3 borde (`><` vs `>=`), q4 N+1 (16 consultas), q5 conteos ×18, q6 `FieldError` campo inexistente, q8 otro significado. Se reescribieron. |
+
+### 15.2 Verificación final (todo verde)
+
+```bash
+python manage.py duel                  # 8 de 8 correctas y baratas (1 consulta por pregunta)
+python manage.py duel --source fresh   # 8 de 8 correctas y baratas
+python manage.py duel --source ai      # 3 de 8  (documentado en los Pasos 6 y 7)
+python manage.py test                  # Found 24 test(s) … OK (skipped=2, requieren teacher/)
+```
+
+| Indicador | Antes | Después |
+|---|---:|---:|
+| Duelo `team` | 0/8 (`todo`) | **8/8** |
+| Consultas de la portada | 23 | **2** |
+| Pruebas fallidas | 1 | **0** |
+| Acciones destructivas sin aprobación | — | 0 (siempre `approval_required`) |
+
+### 15.3 Contenido de esta bitácora
+
+| Paso | Sección | Estado |
+|---|---|---|
+| 1 | Entorno, migraciones y seed | ✔ |
+| 2 | Conteos exactos (4 / 15 / 23) | ✔ |
+| 3 | Diagrama ER textual | ✔ |
+| 4 | Consultas q1-q4 | ✔ |
+| 5 | Consultas q5-q8 + historial de intentos | ✔ |
+| 6 | Veredictos de la IA | ✔ |
+| 7 | Diagnóstico y SQL diffs | ✔ |
+| 8 | Generación desde cero + comparación | ✔ |
+| 9 | Captura del fallo y 23 consultas | ✔ |
+| 10 | Explicación técnica y O(N) | ✔ |
+| 11 | Fix N+1 y métrica Antes/Después | ✔ |
+| 12 | Intenciones del agente | ✔ |
+| 13 | Inyección de prompt | ✔ |
+| 14 | Aprobación, hash y concurrencia | ✔ |
+| 15 | Consolidación y bitácora de IA | ✔ |
+
+### 15.4 Commits (uno por paso, con push a `origin main`)
+
+| Commit | Mensaje |
+|---|---|
+| `698dbb4` | feat: Paso 1 - Configuración de entorno y seed de datos |
+| `e0c464d` | docs: Pasos 2 y 3 - Conteos base y diagrama de relaciones ER |
+| `422c5f3` | feat: Paso 4 - Implementación de consultas duel 1 a 4 |
+| `edb1a36` | feat: Paso 5 - Consultas duel 5 a 8 e historial de intentos |
+| `0989a78` | docs: Pasos 6 y 7 - Diagnóstico de fallos de la IA y SQL diffs |
+| `9ea1d72` | docs: Paso 8 - Comparación de generación desde cero |
+| `83030ee` | docs: Pasos 9 y 10 - Explicación y evidencias del problema N+1 |
+| `bac4a1f` | fix: Paso 11 - Optimización de consultas ORM pasando pruebas N+1 |
+| `f4187a7` | docs: Paso 12 - Evaluación de intenciones del agente |
+| `70051a2` | docs: Paso 13 - Análisis de seguridad e inyección de prompt |
+| `8b2f527` | test: Paso 14 - Validación del plan de aprobación y seguridad por Hash |
+| _(este)_ | docs: Paso 15 - Consolidación del entregable final y bitácora de IA |
+
+> **Nota sobre el remoto:** `origin` apunta al fork con permiso de escritura
+> `https://github.com/edugalindo-jpg/dae-s07-orm-con-ia.git` (el repositorio original
+> `Hellscythe25/...` devolvía `403`); `upstream` conserva el original.
