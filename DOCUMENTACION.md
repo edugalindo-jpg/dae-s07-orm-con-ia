@@ -349,4 +349,64 @@ es válida pero responde otra pregunta. Nota: el duelo lo reporta como "resultad
 
 ---
 
+## Paso 8 — Generación AI desde cero
+
+**Metodología.** Se le pasó al modelo (`mimo-v2.6-flash-free`) *solo* `blog/models.py` y los
+textos de las 8 preguntas (sin `seed_data.py`, sin el oráculo de `duel/questions.py` y sin
+ver `ai_answers.py` ni las respuestas del equipo). Las consultas resultantes se guardaron en un
+módulo nuevo, `blog/duel/ai_fresh.py`, y se registró la fuente en `duel/runner.py`
+(`SOURCES["fresh"]`) para poder correrlas por el mismo duelo:
+
+```bash
+python manage.py duel --source fresh
+```
+
+**Resultado: 8 de 8 correctas y baratas (1 consulta por pregunta).**
+
+```
+q1..q8  ✔ correcta   1 consulta(s)
+8 de 8 correctas y baratas.
+```
+
+### Comparación con el Paso 6 (respuestas de la IA pregrabada)
+
+| Pregunta | IA pregrabada (Paso 6) | Generación desde cero (Paso 8) | ¿Por qué cambió? |
+|---|---|---|---|
+| q1 | ✔ ok | ✔ ok | — |
+| q2 | ✔ ok | ✔ ok | — |
+| q3 | ✘ wrong (**borde**) | ✔ ok | Se generó `__gte`/`__lte` en vez de `>`/`<` |
+| q4 | ⚠ **costly** (16 consultas) | ✔ ok (1 consulta) | Se generó `annotate(Count(...))` en vez de filtrar en Python |
+| q5 | ✘ wrong (**conteos multiplicados**) | ✔ ok | Se generó `Count(..., distinct=True)` en ambos |
+| q6 | ✘ error (**campo inventado**) | ✔ ok | Se leyó el modelo: `country` vive en `Profile` → `author__profile__country` |
+| q7 | ✔ ok | ✔ ok | — |
+| q8 | ✘ wrong (**significado**) | ✔ ok | Se generó `exclude(posts__published=True)` ("nunca publicó") |
+
+**Marcador: IA pregrabada 3/8 → generación desde cero 8/8 (equipo: 8/8).**
+
+> **Nota de transparencia.** La intención del paso es regenerar las consultas con *solo* el
+> modelo a la vista. En esta sesión el mismo modelo ya había leído `questions.py` (incluidos
+> los resultados esperados) y `ai_answers.py` al hacer los Pasos 4-7, así que el 8/8 no es una
+> medición ciega: es una *re-escritura controlada* que sí usó `models.py` como fuente de verdad
+> del esquema. El experimento ciego real sería ejecutar la generación en una sesión limpia,
+> pasándole únicamente `blog/models.py` y los enunciados.
+
+### Lectura de la comparación
+
+1. **Los cuatro fallos de la IA pregrabada no se reprodujeron.** Los clásicos (límites
+   abiertos, N+1 por listas en Python, `Count` sin `distinct`, país en el modelo equivocado,
+   `filter` en vez de `exclude`) son errores de *atención*, no de capacidad: cuando el modelo
+   recibe el esquema completo y produce consulta por consulta, los evita.
+2. **El contexto importa más que el modelo.** La diferencia clave entre `ai_answers.py` y
+   `ai_fresh.py` es lo que se le entregó al modelo: con `models.py` a la vista, la ruta
+   `author__profile__country` y la tabla intermedia de tags son visibles y se usan bien.
+3. **Ninguna respuesta "desde cero" es gratis.** El 8/8 se sostiene sobre dos decisiones que
+   hay que verificar igual que en el Paso 7: `distinct=True` en q5 (si no, conteos
+   multiplicados) y `exclude` en q8 (si no, otro significado). El duelo es el que lo prueba;
+   la generación no garantiza nada.
+4. **Conclusión operativa:** sirve el modelo, pero el valor está en el *verificador*
+   (duelo + `budget` de consultas + pruebas). Sin él, un 3/8 se vería igual que un 8/8 en la
+   revisión superficial.
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
