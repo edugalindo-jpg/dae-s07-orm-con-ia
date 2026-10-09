@@ -409,4 +409,97 @@ q1..q8  ✔ correcta   1 consulta(s)
 
 ---
 
+## Paso 9 — Captura del fallo N+1
+
+```bash
+python manage.py test blog.tests.test_front_page
+```
+
+```
+FAIL: test_front_page_runs_two_queries (blog.tests.test_front_page.FrontPageTests.test_front_page_runs_two_queries)
+  File "blog/tests/test_front_page.py", line 29, in test_front_page_runs_two_queries
+    with self.assertNumQueries(2):
+         ~~~~~~~~~~~~~~~~~~~~~^^^
+AssertionError: 23 != 2 : 23 queries executed, 2 expected
+```
+
+### Las 23 consultas capturadas por Django
+
+```
+ 1. SELECT "blog_post".… FROM "blog_post" WHERE "blog_post"."published" = 1 ORDER BY "blog_post"."published_at" DESC
+ 2. SELECT "blog_author".… FROM "blog_author" WHERE "blog_author"."id" = 2 LIMIT 21
+ 3. SELECT "blog_tag".… INNER JOIN "blog_post_tags" … WHERE "blog_post_tags"."post_id" = 7
+ 4. SELECT "blog_author".… WHERE "blog_author"."id" = 2 LIMIT 21
+ 5. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 5
+ 6. SELECT "blog_author".… WHERE "blog_author"."id" = 2 LIMIT 21
+ 7. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 11
+ 8. SELECT "blog_author".… WHERE "blog_author"."id" = 1 LIMIT 21
+ 9. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 8
+10. SELECT "blog_author".… WHERE "blog_author"."id" = 2 LIMIT 21
+11. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 10
+12. SELECT "blog_author".… WHERE "blog_author"."id" = 2 LIMIT 21
+13. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 4
+14. SELECT "blog_author".… WHERE "blog_author"."id" = 1 LIMIT 21
+15. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 3
+16. SELECT "blog_author".… WHERE "blog_author"."id" = 1 LIMIT 21
+17. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 9
+18. SELECT "blog_author".… WHERE "blog_author"."id" = 1 LIMIT 21
+19. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 2
+20. SELECT "blog_author".… WHERE "blog_author"."id" = 1 LIMIT 21
+21. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 1
+22. SELECT "blog_author".… WHERE "blog_author"."id" = 2 LIMIT 21
+23. SELECT "blog_tag".…    WHERE "blog_post_tags"."post_id" = 6
+```
+
+## Paso 10 — Explicación técnica
+
+**Desglose de las 23 consultas**
+
+| Grupo | Consultas | Origen en el código |
+|---|---|---|
+| Artículos de la portada | **1** (nº 1) | `Post.objects.filter(published=True)` en `blog/queries.py:10` |
+| Autor por artículo | **11** (nºs 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22) | `post.author` en la plantilla, sin `select_related` |
+| Etiquetas por artículo | **11** (nºs 3, 5, 7, …, 23) | `post.tags.all()` en la plantilla, sin `prefetch_related` |
+| **Total** | **1 + 11 + 11 = 23** | |
+
+- **N = 11**: hay 15 artículos en la BD, 4 son borradores y no se renderizan; quedan 11
+  publicados, que es exactamente el número de filas que devuelve la consulta 1.
+- **Autor: 11 consultas (N).** El `ForeignKey` de `Post` a `Author` es *lazy*: mientras el
+  template hace `post.author.name`, Django lanza
+  `SELECT … FROM blog_author WHERE id = ? LIMIT 21` **por cada artículo**. Django no reutiliza
+  el resultado aunque se repitan los autores (Ana y Beto), porque la caché de relación vive en
+  la *instancia* de `Post`, no globalmente: 11 instancias → 11 consultas.
+- **Etiquetas: 11 consultas.** `Post.tags` es una relación M:N *multi-valorada*: no puede
+  resolverse con un solo `JOIN` sin multiplicar las filas del artículo, así que por defecto
+  Django no la adelanta y ejecuta `SELECT … FROM blog_tag INNER JOIN blog_post_tags WHERE
+  post_id = ?` una vez por artículo.
+- **Total: 23 = 1 + N + N**, con N = artículos publicados.
+
+**Escalabilidad O(N)**
+
+Sea N el número de artículos que muestra la portada:
+
+$$T(N) = 1 + \underbrace{N}_{\text{consulta por autor}} + \underbrace{N}_{\text{consulta por etiquetas}} = 1 + 2N \;\in\; O(N)$$
+
+Cada año que crece el blog (más artículos publicados) hace crecer linealmente el número de
+ida y vuelta a la BD:
+
+| Artículos publicados | Consultas (antes) | Consultas (después) |
+|---:|---:|---:|
+| 11 (actual) | 23 | 2 |
+| 100 | 201 | 2 |
+| 1 000 | 2 001 | 2 |
+| 10 000 | 20 001 | 2 |
+
+Además, cada consulta tiene latencia de red (ida y vuelta), no solo CPU: 2 001 consultas con
+20 ms cada una son ~40 s de bloqueo por petición HTTP. Y como cada consulta abre plan,
+allocación y, en servidores reales, un turno en la conexión, el coste no es solo de red.
+
+Con `select_related` + `prefetch_related` el coste pasa a ser **O(1)**: siempre exactamente
+2 consultas — una para los artículos *con su autor resuelto en el mismo JOIN* y otra para
+**todas** las etiquetas de esos artículos de una sola vez (`WHERE post_id IN (…)`), sin importar
+cuántos artículos se muestren. Ese es exactamente el objetivo del Paso 11.
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
