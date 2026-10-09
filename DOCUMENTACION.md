@@ -699,9 +699,12 @@ python manage.py test blog.tests.test_agent
 
 ## Paso 14 — Flujo de aprobación, hash y concurrencia
 
-> Nota: `seed_blog` borra y reinserta, así que los `id` autoincrementales siguen creciendo
-> (los artículos quedan en 16-30 tras un reseed). Todas las pruebas de este paso se hicieron
-> contra el `id` real del artículo, no contra el número de la semilla.
+> Nota: `seed_blog` borra y reinserta, así que los `id` autoincrementales **no vuelven a 1**:
+> cada reseed los hace seguir creciendo (tras varios reseeds, el artículo 1 es el `id=46`).
+> Por eso todas las pruebas de este paso se hicieron contra el `id` real del artículo
+> (resuelto con `Post.objects.filter(published=True).order_by("id").first()`), no contra el
+> número de la semilla. `--intent '{"post_id": 1}'` del README solo funciona en la primera
+> carga.
 
 ### 14.1 Aprobación limpia (artículo 5)
 
