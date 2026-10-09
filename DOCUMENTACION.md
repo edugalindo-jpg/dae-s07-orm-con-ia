@@ -586,4 +586,37 @@ consulta (regresión futura).
 
 ---
 
+## Paso 12 — Intenciones del agente
+
+```bash
+python manage.py agent --intent '{"action": "posts_per_author", "args": {}}'
+python manage.py agent --intent '{"action": "comments_of_post", "args": {"post_id": 1}}'
+python manage.py agent --intent '{"action": "delete_comments_of_post", "args": {"post_id": 1}}'
+python manage.py agent --intent '{"action": "run_sql", "args": {}}'
+```
+
+> Nota de ejecución: en PowerShell 5.1 las comillas del JSON se comen al pasar el argumento al
+> proceso nativo; se ejecutó vía `cmd /c 'venv\Scripts\python.exe manage.py agent --intent "{\"action\": …}"'`.
+
+| # | Intención | Riesgo | Resultado | Justificación |
+|---|---|---|---|---|
+| 1 | `posts_per_author` | R0 (lectura) | **`ok`** | Acción en el catálogo cerrado, sin argumentos: se ejecuta y devuelve los conteos (Beto 6, Ana 6, Carla 3). |
+| 2 | `comments_of_post` (`post_id: 1`) | R0 (lectura) | **`ok`** | Lectura; la salida viene envuelta en `untrusted_data`: el comentario 4 hostil se devuelve como *dato*, no como orden. |
+| 3 | `delete_comments_of_post` (`post_id: 1`) | R2 (destructiva) | **`approval_required`** | Escritura destructiva: **no se borra nada**. Se devuelve el plan con los ids afectados `[1..6]` y el `plan_hash` `c3ff9f72bb5e`; solo el hash que devuelve *eso* exacto, pasado a mano por un humano con `--approve`, puede aplicarlo. |
+| 4 | `run_sql` | — | **`denied`** | No existe en `ACTIONS`; la pasarela la rechaza sin interpretarla (`unknown action 'run_sql'`). No hay `eval`, ni SQL libre, ni ORM crudo. |
+
+Salidas reales:
+
+```json
+// 1 → {"status": "ok", "untrusted_data": [{"author": "Beto Salas", "total": 6}, …]}
+// 3 → {"status": "approval_required", "plan": {"action": "delete_comments_of_post",
+//        "args": {"post_id": 1}, "details": {"affected_comment_ids": [1,2,3,4,5,6]},
+//        "plan_hash": "c3ff9f72bb5e"}}
+// 4 → {"status": "denied", "reason": "unknown action 'run_sql'"}
+```
+
+Verificación de que la intención 3 no mutó nada: `Comment.objects.count()` sigue en **23**.
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
