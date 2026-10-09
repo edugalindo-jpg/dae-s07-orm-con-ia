@@ -502,4 +502,88 @@ cuántos artículos se muestren. Ese es exactamente el objetivo del Paso 11.
 
 ---
 
+## Paso 11 — Corrección N+1 con `select_related` y `prefetch_related`
+
+**Cambio en `blog/queries.py`:**
+
+```python
+def posts_for_front_page():
+    return (
+        Post.objects.filter(published=True)
+        .select_related("author")
+        .prefetch_related("tags")
+        .order_by("-published_at")
+    )
+```
+
+- `select_related("author")` → `Author` es un `ForeignKey` (N:1), así que se resuelve con un
+  `INNER JOIN` **en la misma consulta**: el autor de cada artículo viene "embebido" y
+  `post.author.name` ya no dispara nada.
+- `prefetch_related("tags")` → `tags` es M:N, no puede resolverse en el mismo `SELECT` sin
+  multiplicar filas, así que Django hace **una segunda consulta** con `post_id IN (…)` para
+  *todos* los artículos y arma el resultado en memoria.
+
+**SQL resultante (2 consultas):**
+
+```sql
+-- 1) los artículos + su autor, en un solo golpe
+SELECT "blog_post".…, "blog_author"."id", "blog_author"."name"
+FROM "blog_post" INNER JOIN "blog_author" ON ("blog_post"."author_id" = "blog_author"."id")
+WHERE "blog_post"."published" = 1 ORDER BY "blog_post"."published_at" DESC
+
+-- 2) TODAS las etiquetas de TODOS los artículos de la portada
+SELECT ("blog_post_tags"."post_id") AS "_prefetch_related_val_post_id", "blog_tag"."id", "blog_tag"."name"
+FROM "blog_tag" INNER JOIN "blog_post_tags" ON ("blog_tag"."id" = "blog_post_tags"."tag_id")
+WHERE "blog_post_tags"."post_id" IN (7, 5, 11, 8, 10, 4, 3, 9, 2, 1, 6)
+```
+
+### Métrica Antes vs Después
+
+| Métrica | Antes (starter) | Después (fix) |
+|---|---:|---:|
+| Consultas por petición a la portada | **23** | **2** |
+| Composición | 1 + N(autores) + N(etiquetas), N = 11 | 1 + 1 (prefetch) |
+| Consultas con 100 artículos publicados | 201 | 2 |
+| Consultas con 10 000 artículos publicados | 20 001 | 2 |
+| Orden de complejidad | O(N) | **O(1)** |
+| Fallos en `python manage.py test` | 1 (`test_front_page_runs_two_queries`) | **0** |
+
+Verificación:
+
+```
+$ python manage.py test blog.tests.test_front_page
+..s
+Found 3 test(s).
+Ran 3 tests in 0.065s
+OK (skipped=1)
+
+$ python manage.py test
+Found 24 test(s).
+Ran 24 tests in 0.238s
+OK (skipped=2)
+```
+
+Los 2 *skipped* son las pruebas que requieren la carpeta `teacher/` (ausente en la copia del
+alumno): `test_reference_solutions_are_all_correct_and_cheap` y
+`test_the_reference_solution_is_green`.
+
+### Ajuste de la prueba de partida (documentado)
+
+Al escribir las 8 respuestas del equipo (Pasos 4-5) empezó a fallar
+`blog/tests/test_duel.py::test_the_starter_has_nothing_written`, que afirmaba que
+`team.py` estaba **sin escribir** (`{"todo"}`). Es una aserción del *starter*, no del
+comportamiento del código: ya no describe el estado del laboratorio. Se reemplazó por la que
+sí corresponde a la meta de la guía:
+
+```python
+def test_the_team_answers_are_all_correct_and_cheap(self):
+    self.assertEqual(set(self.statuses("team").values()), {"ok"})
+```
+
+Así el conjunto completo (`python manage.py test`) queda en **0 fallos**, tal como pide el
+Paso 11, y la prueba pasa a garantizar que las 8 consultas sigan siendo correctas y de 1
+consulta (regresión futura).
+
+---
+
 *(Los pasos siguientes se van agregando abajo.)*
